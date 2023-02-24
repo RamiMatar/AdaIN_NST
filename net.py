@@ -1,3 +1,6 @@
+import torch
+import torch.nn as nn
+import torchvision.models as models
 class Encoder(nn.Module):
     def __init__(self, model = 'VGG19', device = "cpu"):
         super().__init__()
