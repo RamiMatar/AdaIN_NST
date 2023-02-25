@@ -19,7 +19,7 @@ from torch.utils.data.distributed import DistributedSampler
 class Trainer():
     def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", decay_lr = None, alpha = 1.0, k = 1.0):
         self.device = torch.device(rank)
-        self.model = model.to(self.device)
+        self.model = DDP(model, device_ids=[rank])
         self.dataloader = dataloader
         self.lr = learning_rate
         self.save_every = save_every
@@ -48,7 +48,7 @@ class Trainer():
         self.writer.add_scalar("Total Loss", style_loss + content_loss, step)
         grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 1) 
         self.writer.add_image("Style Transfer Result", grid, step)
-        
+
     def run_epoch(self, epoch_num):
         num_batches = len(self.dataloader)
         progress_bar = trange(num_batches, desc = "epoch" + str(epoch_num))
@@ -64,7 +64,7 @@ class Trainer():
 
     def training_step(self, epoch, batch_num, data):
         content, style = data
-        content_loss, style_loss, stylized = self.model(data)
+        content_loss, style_loss, stylized = self.model.module(data)
         loss = content_loss + self.k * style_loss
 
         self.step += 1
@@ -76,7 +76,7 @@ class Trainer():
     
     def save_model(self, epoch, step):
         checkpoint = {
-            "model" : self.model.state_dict(),
+            "model" : self.model.module.state_dict(),
             "epoch" : self.epoch,
             "optimizer": self.optimizer.state_dict(),
             "step": self.step
@@ -87,7 +87,7 @@ class Trainer():
     def load_checkpoint(self):
         PATH = "checkpoint.pt"
         checkpoint = torch.load(PATH)
-        self.model.load_state_dict(checkpoint['model'])
+        self.model.module.load_state_dict(checkpoint['model'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epoch = checkpoint['epoch']
         self.step = checkpoint['step']
@@ -111,7 +111,7 @@ def main(rank, world_size, args):
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     ddp_setup(rank, world_size)
-    model, dataset, dataloader, writer = load_train_objects(rank)
+    model, dataloader, writer = load_train_objects(rank, args.writer_dir)
     trainer = Trainer(model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
     if args.load_model:
         trainer.load_checkpoint()
@@ -120,16 +120,17 @@ def main(rank, world_size, args):
 
 def load_train_objects(rank):
     model = Model(rank)
-    dataset = ContentStyleDataset('album_covers_512/', 'images/', transform = loader)
+    dataset = ContentStyleDataset('album_covers_512/', 'mscoco/', 'wikiart/', transform = loader)
     dataloader = DataLoader(dataset, batch_size = 8, shuffle = True, num_workers = 4, sampler = DistributedSampler(dataset))
     writer = SummaryWriter()
-    return model, dataset, dataloader, writer
+    return model, dataloader, writer
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Neural Style Transfer following the AdaIN paper by Huang, et. al.')
-    parser.add_argument('total_epochs', type=int, help='Total epochs to train the model')
-    parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt')
+    parser.add_argument('total_epochs', type=int, help='Total epochs to train the model', default = 1)
+    parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt, default 0', default = 0)
+    parser.add_argument('writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
     args = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
