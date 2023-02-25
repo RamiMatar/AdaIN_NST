@@ -10,9 +10,15 @@ from torch.utils.tensorboard import SummaryWriter
 from PIL import Image, ImageFile
 from dataset import collate, ContentStyleDataset, loader
 from net import Model
+import os
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+
 class Trainer():
-    def __init__(self, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", decay_lr = None, alpha = 1.0, k = 10.0):
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", decay_lr = None, alpha = 1.0, k = 1.0):
+        self.device = torch.device(rank)
         self.model = model.to(self.device)
         self.dataloader = dataloader
         self.lr = learning_rate
@@ -25,6 +31,8 @@ class Trainer():
         self.decay_lr = decay_lr
         self.alpha = alpha
         self.k = k
+        self.epoch = 0
+        self.step = 0
 
     def train(self, num_epochs, load = None):
         epoch = self.load_model() if load != None else 0
@@ -38,10 +46,9 @@ class Trainer():
         self.writer.add_scalar("Style Loss", style_loss, step)
         self.writer.add_scalar("Content Loss", content_loss, step)
         self.writer.add_scalar("Total Loss", style_loss + content_loss, step)
-        self.writer.add_image("Content Images", content[0], step)
-        self.writer.add_image("Style Images", style[0], step)
-        self.writer.add_image("Stylized Output", stylized[0], step)
-
+        grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 1) 
+        self.writer.add_image("Style Transfer Result", grid, step)
+        
     def run_epoch(self, epoch_num):
         num_batches = len(self.dataloader)
         progress_bar = trange(num_batches, desc = "epoch" + str(epoch_num))
@@ -60,31 +67,19 @@ class Trainer():
         content_loss, style_loss, stylized = self.model(data)
         loss = content_loss + self.k * style_loss
 
-        step = epoch * len(self.dataloader) + batch_num
-        self.logs(step, content, style, stylized, content_loss, style_loss)
+        self.step += 1
+        self.logs(self.step, content, style, stylized, content_loss, style_loss)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         return content_loss, style_loss
     
-    def evaluation_step(self, data, start, ext = '.png'):
-        batch_size = self.dataloader.batch_size
-        content, style = data
-        _, _, stylized = self.model(data)
-        content = torch.chunk(content, batch_size, dim = 0)
-        style = torch.chunk(style, batch_size, dim = 0)
-        stylized = torch.chunk(stylized, batch_size, dim = 0)
-        print(content[0].shape, style[0].shape, stylized[0].shape)
-        for i in range(batch_size):
-            current = start + i
-            vutils.save_image([content[i].squeeze(), style[i].squeeze(), stylized[i].squeeze()], str(current) + ext, nrow = 1) 
-
     def save_model(self, epoch, step):
         checkpoint = {
             "model" : self.model.state_dict(),
-            "epoch" : epoch,
+            "epoch" : self.epoch,
             "optimizer": self.optimizer.state_dict(),
-            "step": step
+            "step": self.step
         }
         PATH = "checkpoint.pt"
         torch.save(checkpoint, PATH)
@@ -93,37 +88,50 @@ class Trainer():
         PATH = "checkpoint.pt"
         checkpoint = torch.load(PATH)
         self.model.load_state_dict(checkpoint['model'])
-        epoch = checkpoint['epoch']
-        print("RESUMING FROM EPOCH ", epoch)
-        return epoch
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.epoch = checkpoint['epoch']
+        self.step = checkpoint['step']
+        print("RESUMING FROM EPOCH ", self.epoch)
     
-    def evaluate(self, num):
-        self.model.eval()
-        progress_bar = trange(0, num, desc = "Evaluating model on images")
-        for batch_num, data in enumerate(self.dataloader):
-            if progress_bar.n >= num:
-                break
-            data = data.to(self.device)
-            self.evaluation_step(data, progress_bar.n)
-            progress_bar.update(self.dataloader.batch_size)
+
     
+def ddp_setup(rank, world_size):
+    """
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12974"
+    init_process_group(backend='gloo', rank=rank, world_size=world_size)
+
+def main(rank, world_size, args):
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    ddp_setup(rank, world_size)
+    model, dataset, dataloader, writer = load_train_objects(rank)
+    trainer = Trainer(model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
+    if args.load_model:
+        trainer.load_checkpoint()
+    trainer.train(args.total_epochs)
+    destroy_process_group()
+
+def load_train_objects(rank):
+    model = Model(rank)
+    dataset = ContentStyleDataset('album_covers_512/', 'images/', transform = loader)
+    dataloader = DataLoader(dataset, batch_size = 8, shuffle = True, num_workers = 4, sampler = DistributedSampler(dataset))
+    writer = SummaryWriter()
+    return model, dataset, dataloader, writer
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Neural Style Transfer following the AdaIN paper by Huang, et. al.')
     parser.add_argument('total_epochs', type=int, help='Total epochs to train the model')
     parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt')
-    parser.add_argument('evaluate', type=int, help='0 to train, X to evaluate for X random image pairs')
     args = parser.parse_args() 
     
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    model = Model(device)
-    dataset = ContentStyleDataset('album_covers_512/', 'images/', transform = loader)
-    dataloader = DataLoader(dataset, batch_size = 8, shuffle = True, num_workers = 8, collate_fn = collate)
-    writer = SummaryWriter()
-    trainer = Trainer(model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
-    if args.load_model:
-        trainer.load_checkpoint()
-    if args.evaluate:
-        trainer.evaluate(args.evaluate)
-    else:
-        trainer.train(args.total_epochs)
+    world_size = torch.cuda.device_count()
+    print("Starting multi processes")
+    mp.spawn(main, args=(world_size, args), nprocs=world_size)
