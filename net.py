@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 class Encoder(nn.Module):
-    def __init__(self, model = 'VGG19', device = "cpu"):
+    def __init__(self, model = 'VGG16', device = "cpu"):
         super().__init__()
         if model == 'VGG19':
-            vgg = models.vgg19(weights='DEFAULT').to(device)
+            vgg = models.vgg19(weights='DEFAULT').eval()
         else:
-            vgg = models.vgg16(weights='DEFAULT').to(device)
+            vgg = models.vgg16(weights='DEFAULT').eval()
         vgg = vgg.features
+        vgg = vgg.to(device)
         self.layers = [vgg[0:4], vgg[4:9], vgg[9:16], vgg[16:23]]
 
         for param in self.parameters():
@@ -55,8 +56,8 @@ class Decoder(nn.Module):
           nn.ReLU(),
           nn.ReflectionPad2d((1, 1, 1, 1)),
           nn.Conv2d(64, 3, (3, 3)),
-        )
-        self.decoder = self.decoder.to(device)
+        ).to(device)
+        self.decoder = self.decoder
     def forward(self, x):
         return self.decoder(x)
     

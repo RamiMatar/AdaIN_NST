@@ -17,66 +17,81 @@ import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 
 class Trainer():
-    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", decay_lr = None, alpha = 1.0, k = 1.0):
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 2.5):
         self.device = torch.device(rank)
+        self.rank = rank
         self.model = DDP(model, device_ids=[rank])
         self.dataloader = dataloader
         self.lr = learning_rate
         self.save_every = save_every
         self.writer = writer
         if optimizer == "adam":
-            self.optimizer = torch.optim.Adam(model.parameters(), lr = self.lr)
+            self.optimizer = torch.optim.Adam(self.model.module.decoder.parameters(), lr = self.lr)
         else:
-            self.optimizer = torch.optim.SGD(model.parameters(), lr = self.lr)
-        self.decay_lr = decay_lr
+            self.optimizer = torch.optim.SGD(self.model.module.decoder.parameters(), lr = self.lr)
+        self.lr_decay = lr_decay
         self.alpha = alpha
         self.k = k
         self.epoch = 0
         self.step = 0
 
-    def train(self, num_epochs, load = None):
-        epoch = self.load_model() if load != None else 0
-        with trange(epoch, num_epochs, desc="All epochs") as epochs:
+    def train(self, num_epochs):
+        with trange(self.epoch, num_epochs, desc="All epochs") as epochs:
             for epoch in epochs:
                 self.run_epoch(epoch)
 
-    def logs(self, step, content, style, stylized, style_loss, content_loss):
+    def logs(self, step, content, style, stylized, content_loss, style_loss, loss):
        # if step == 0:
             #self.writer.add_graph(self.model, (torch.randn(self.dataloader.batch_size, 3, 128, 128), torch.randn(self.dataloader.batch_size, 3, 128, 128)))
         self.writer.add_scalar("Style Loss", style_loss, step)
         self.writer.add_scalar("Content Loss", content_loss, step)
-        self.writer.add_scalar("Total Loss", style_loss + content_loss, step)
-        grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 1) 
+        self.writer.add_scalar("Total Loss", loss, step)
+        grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 3) 
         self.writer.add_image("Style Transfer Result", grid, step)
 
+    def learning_rate_decay(self):
+        lr = self.lr / (1.0 + self.lr_decay * self.step)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
+
+    def overfit(self, iters):
+        data = next(iter(self.dataloader))
+        data = data.to(self.device)
+        for i in range(iters):
+            self.training_step(0,0,data)
+            content_loss, style_loss, loss = self.training_step(0,0,data)
+             
     def run_epoch(self, epoch_num):
         num_batches = len(self.dataloader)
-        progress_bar = trange(num_batches, desc = "epoch" + str(epoch_num))
+        progress_bar = trange(num_batches, desc = "epoch" + str(epoch_num) + " gpu: " + str(self.device))
         for batch_num, data in enumerate(self.dataloader):
+            self.learning_rate_decay()
             data = data.to(self.device)
-            content_loss, style_loss = self.training_step(epoch_num, batch_num, data)
+            content_loss, style_loss, loss = self.training_step(epoch_num, batch_num, data)
             progress_bar.update(1)
-            progress_bar.set_postfix(content_loss = content_loss.detach().cpu().numpy(), style_loss = style_loss.detach().cpu().numpy(), total_loss = (content_loss + style_loss).detach().cpu().numpy())
-            if batch_num % 1000 == 0:
+            progress_bar.set_postfix(content_loss = content_loss.item(), style_loss = style_loss.item(), total_loss = loss.item())
+            if batch_num % 100 == 0 and self.rank == 0:
                 self.save_model(epoch_num, batch_num)
-        if epoch_num % self.save_every == 0:
-            self.save_model(epoch_num + 1, 0)
 
     def training_step(self, epoch, batch_num, data):
         content, style = data
         content_loss, style_loss, stylized = self.model.module(data)
         loss = content_loss + self.k * style_loss
-
+        
         self.step += 1
-        self.logs(self.step, content, style, stylized, content_loss, style_loss)
+        if self.step % 100 == 0 and self.rank == 0:
+            self.logs(self.step, content, style, stylized, content_loss, style_loss, loss)
+            grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 3)
+            vutils.save_image(grid, 'outputs/step'+str(self.step)+'.png')
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        return content_loss, style_loss
+        return content_loss, style_loss, loss
     
     def save_model(self, epoch, step):
         checkpoint = {
-            "model" : self.model.module.state_dict(),
+            "model" : self.model.state_dict(),
             "epoch" : self.epoch,
             "optimizer": self.optimizer.state_dict(),
             "step": self.step
@@ -86,8 +101,8 @@ class Trainer():
 
     def load_checkpoint(self):
         PATH = "checkpoint.pt"
-        checkpoint = torch.load(PATH)
-        self.model.module.load_state_dict(checkpoint['model'])
+        checkpoint = torch.load(PATH, map_location = "cuda:{}".format(self.rank))
+        self.model.load_state_dict(checkpoint['model'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epoch = checkpoint['epoch']
         self.step = checkpoint['step']
@@ -106,23 +121,24 @@ def ddp_setup(rank, world_size):
     init_process_group(backend='gloo', rank=rank, world_size=world_size)
 
 def main(rank, world_size, args):
-    torch.manual_seed(0)
-    torch.cuda.manual_seed(0)
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     ddp_setup(rank, world_size)
     model, dataloader, writer = load_train_objects(rank, args.writer_dir)
-    trainer = Trainer(model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
+    trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
     if args.load_model:
         trainer.load_checkpoint()
-    trainer.train(args.total_epochs)
+    if args.overfit == 'overfit':
+        trainer.overfit(10000)
+    else:
+        trainer.train(args.total_epochs)
     destroy_process_group()
 
-def load_train_objects(rank):
+def load_train_objects(rank, writer_dir):
     model = Model(rank)
     dataset = ContentStyleDataset('album_covers_512/', 'mscoco/', 'wikiart/', transform = loader)
-    dataloader = DataLoader(dataset, batch_size = 8, shuffle = True, num_workers = 4, sampler = DistributedSampler(dataset))
-    writer = SummaryWriter()
+    dataloader = DataLoader(dataset, batch_size = 8, collate_fn = collate, shuffle = False, num_workers = 0, sampler = DistributedSampler(dataset))
+    writer = SummaryWriter(writer_dir)
     return model, dataloader, writer
 
 if __name__ == "__main__":
@@ -131,6 +147,7 @@ if __name__ == "__main__":
     parser.add_argument('total_epochs', type=int, help='Total epochs to train the model', default = 1)
     parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt, default 0', default = 0)
     parser.add_argument('writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
+    parser.add_argument('overfit', type=str, help="overfit to overfit, any other str to run normally", default = "regular")
     args = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
