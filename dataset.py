@@ -15,6 +15,14 @@ loader = transforms.Compose([transforms.Resize(imsize),
                             transforms.ToTensor(),
                             normalize])
 
+def get_all_jpg_files(path):
+    jpg_files = []
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if file.endswith('.jpg'):
+                jpg_files.append(os.path.join(root, file))
+    return jpg_files
+
 def denorm(tensor, device):
     std = torch.Tensor([0.229, 0.224, 0.225]).reshape(-1, 1, 1).to(device)
     mean = torch.Tensor([0.485, 0.456, 0.406]).reshape(-1, 1, 1).to(device)
@@ -26,13 +34,9 @@ class ContentStyleDataset(torch.utils.data.Dataset):
         self.content_dir = content_dir
         self.style_dir = style_dir
         self.transform = transform
-        self.content_filenames = [content_dir + "/" + filename for filename in os.listdir(content_dir) if filename.endswith('.jpg') or filename.endswith('.png') or filename.endswith('.jpeg')]
-        #self.content_filenames.extend([albums_dir + "/" + filename for filename in os.listdir(albums_dir) if filename.endswith('.jpg') or filename.endswith('.png') or filename.endswith('jpeg')])
-        self.style_filenames = [filename for filename in os.listdir(style_dir) if filename.endswith('.jpg') or filename.endswith('.jpeg') or filename.endswith('.png')]
-        self.content_file_map = {index: filename for index, filename in enumerate(self.content_filenames)}
-        self.style_content_map  = {index: filename for index, filename in enumerate(self.style_filenames)}
-        print(len(self.content_filenames))
-
+        self.content_filenames = get_all_jpg_files(content_dir)
+        self.style_filenames = get_all_jpg_files(style_dir)
+        
     def __len__(self):
         return len(self.content_filenames)
         
