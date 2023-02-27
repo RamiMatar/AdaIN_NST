@@ -5,12 +5,12 @@ class Encoder(nn.Module):
     def __init__(self, model = 'VGG16', device = "cpu"):
         super().__init__()
         if model == 'VGG19':
-            vgg = models.vgg19(weights='DEFAULT').eval()
+            vgg = models.vgg19(pretrained=True).eval()
         else:
-            vgg = models.vgg16(weights='DEFAULT').eval()
+            vgg = models.vgg16(pretrained=True).eval()
         vgg = vgg.features
         vgg = vgg.to(device)
-        self.layers = [vgg[0:4], vgg[4:9], vgg[9:16], vgg[16:23]]
+        self.layers = [vgg[0:2], vgg[2:7], vgg[7:12], vgg[12:21]]
 
         for param in self.parameters():
             param.requires_grad = False

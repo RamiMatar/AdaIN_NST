@@ -8,16 +8,15 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 from torch.utils.tensorboard import SummaryWriter
 from PIL import Image, ImageFile
-from dataset import collate, ContentStyleDataset, loader
+from dataset import collate, ContentStyleDataset, loader, denorm
 from net import Model
 import os
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
-
 class Trainer():
-    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 2.5):
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 2.5):
         self.device = torch.device(rank)
         self.rank = rank
         self.model = DDP(model, device_ids=[rank])
@@ -25,6 +24,7 @@ class Trainer():
         self.lr = learning_rate
         self.save_every = save_every
         self.writer = writer
+        self.progress_dir = progress_dir + '/'
         if optimizer == "adam":
             self.optimizer = torch.optim.Adam(self.model.module.decoder.parameters(), lr = self.lr)
         else:
@@ -46,8 +46,10 @@ class Trainer():
         self.writer.add_scalar("Style Loss", style_loss, step)
         self.writer.add_scalar("Content Loss", content_loss, step)
         self.writer.add_scalar("Total Loss", loss, step)
-        grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 3) 
-        self.writer.add_image("Style Transfer Result", grid, step)
+        if step % 500 == 0:
+            grid = vutils.make_grid([denorm(content[0].squeeze(), self.device), denorm(style[0].squeeze(), self.device), denorm(stylized[0].squeeze(), self.device)], nrow = 3) 
+            self.writer.add_image("Style Transfer Result", grid, step)
+            vutils.save_image(grid, self.progress_dir + str(self.step)+'.png')
 
     def learning_rate_decay(self):
         lr = self.lr / (1.0 + self.lr_decay * self.step)
@@ -58,9 +60,12 @@ class Trainer():
     def overfit(self, iters):
         data = next(iter(self.dataloader))
         data = data.to(self.device)
-        for i in range(iters):
-            self.training_step(0,0,data)
-            content_loss, style_loss, loss = self.training_step(0,0,data)
+        with trange(0, iters, desc="All epochs") as progress_bar:
+            for i in range(iters):
+                self.training_step(0,0,data)
+                content_loss, style_loss, loss = self.training_step(data)
+                progress_bar.update(1)
+
              
     def run_epoch(self, epoch_num):
         num_batches = len(self.dataloader)
@@ -68,39 +73,35 @@ class Trainer():
         for batch_num, data in enumerate(self.dataloader):
             self.learning_rate_decay()
             data = data.to(self.device)
-            content_loss, style_loss, loss = self.training_step(epoch_num, batch_num, data)
+            content_loss, style_loss, loss = self.training_step(data)
             progress_bar.update(1)
             progress_bar.set_postfix(content_loss = content_loss.item(), style_loss = style_loss.item(), total_loss = loss.item())
             if batch_num % 100 == 0 and self.rank == 0:
-                self.save_model(epoch_num, batch_num)
+                self.save_model(epoch_num, "checkpoint.pt")
 
-    def training_step(self, epoch, batch_num, data):
+    def training_step(self, data):
         content, style = data
-        content_loss, style_loss, stylized = self.model.module(data)
+        content_loss, style_loss, stylized = self.model(data)
         loss = content_loss + self.k * style_loss
         
         self.step += 1
-        if self.step % 100 == 0 and self.rank == 0:
+        if self.rank == 0:
             self.logs(self.step, content, style, stylized, content_loss, style_loss, loss)
-            grid = vutils.make_grid([content[0].squeeze(), style[0].squeeze(), stylized[0].squeeze()], nrow = 3)
-            vutils.save_image(grid, 'outputs/step'+str(self.step)+'.png')
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         return content_loss, style_loss, loss
     
-    def save_model(self, epoch, step):
+    def save_model(self, epoch, PATH):
         checkpoint = {
             "model" : self.model.state_dict(),
-            "epoch" : self.epoch,
+            "epoch" : epoch + 1,
             "optimizer": self.optimizer.state_dict(),
             "step": self.step
         }
-        PATH = "checkpoint.pt"
         torch.save(checkpoint, PATH)
 
-    def load_checkpoint(self):
-        PATH = "checkpoint.pt"
+    def load_checkpoint(self, PATH):
         checkpoint = torch.load(PATH, map_location = "cuda:{}".format(self.rank))
         self.model.load_state_dict(checkpoint['model'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -125,7 +126,7 @@ def main(rank, world_size, args):
     device = torch.device("cuda", rank)
     ddp_setup(rank, world_size)
     model, dataloader, writer = load_train_objects(rank, args.writer_dir)
-    trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer)
+    trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer, progress_dir = args.progress_dir)
     if args.load_model:
         trainer.load_checkpoint()
     if args.overfit == 'overfit':
@@ -148,6 +149,7 @@ if __name__ == "__main__":
     parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt, default 0', default = 0)
     parser.add_argument('writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
     parser.add_argument('overfit', type=str, help="overfit to overfit, any other str to run normally", default = "regular")
+    parser.add_argument('progress_dir', type=str, help="Directory to save progress images, default is ./outputs", default = "./outputs")
     args = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
