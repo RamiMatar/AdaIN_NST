@@ -11,7 +11,7 @@ imsize = 512 if torch.cuda.is_available() else 128
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
 
-loader = transforms.Compose([transforms.Resize(imsize),
+loader = transforms.Compose([transforms.Resize([imsize, imsize]),
                             transforms.ToTensor(),
                             normalize])
 
@@ -36,7 +36,7 @@ class ContentStyleDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.content_filenames = get_all_jpg_files(content_dir)
         self.style_filenames = get_all_jpg_files(style_dir)
-        
+        print(len(self.style_filenames), len(self.content_filenames)) 
     def __len__(self):
         return len(self.content_filenames)
         
@@ -45,8 +45,7 @@ class ContentStyleDataset(torch.utils.data.Dataset):
         if content_image.mode != 'RGB':
             content_image = content_image.convert('RGB')
         random_style_idx = torch.randint(low = 0, high = len(self.style_filenames), size=(1,))
-        style_path = os.path.join(self.style_dir, self.style_filenames[random_style_idx])
-        style_image = Image.open(style_path)
+        style_image = Image.open(self.style_filenames[random_style_idx])
         if style_image.mode != 'RGB':
             style_image = style_image.convert('RGB')
         if self.transform:

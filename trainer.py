@@ -16,7 +16,7 @@ from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 class Trainer():
-    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 2.5):
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 5.0):
         self.device = torch.device(rank)
         self.rank = rank
         self.model = DDP(model, device_ids=[rank])
@@ -46,7 +46,7 @@ class Trainer():
         self.writer.add_scalar("Style Loss", style_loss, step)
         self.writer.add_scalar("Content Loss", content_loss, step)
         self.writer.add_scalar("Total Loss", loss, step)
-        if step % 500 == 0:
+        if step % 10 == 0:
             grid = vutils.make_grid([denorm(content[0].squeeze(), self.device), denorm(style[0].squeeze(), self.device), denorm(stylized[0].squeeze(), self.device)], nrow = 3) 
             self.writer.add_image("Style Transfer Result", grid, step)
             vutils.save_image(grid, self.progress_dir + str(self.step)+'.png')
@@ -62,7 +62,7 @@ class Trainer():
         data = data.to(self.device)
         with trange(0, iters, desc="All epochs") as progress_bar:
             for i in range(iters):
-                self.training_step(0,0,data)
+                self.training_step(data)
                 content_loss, style_loss, loss = self.training_step(data)
                 progress_bar.update(1)
 
@@ -76,7 +76,7 @@ class Trainer():
             content_loss, style_loss, loss = self.training_step(data)
             progress_bar.update(1)
             progress_bar.set_postfix(content_loss = content_loss.item(), style_loss = style_loss.item(), total_loss = loss.item())
-            if batch_num % 100 == 0 and self.rank == 0:
+            if batch_num % 200 == 0 and self.rank == 0:
                 self.save_model(epoch_num, "checkpoint.pt")
 
     def training_step(self, data):
@@ -128,7 +128,7 @@ def main(rank, world_size, args):
     model, dataloader, writer = load_train_objects(rank, args.writer_dir)
     trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer, progress_dir = args.progress_dir)
     if args.load_model:
-        trainer.load_checkpoint()
+        trainer.load_checkpoint('checkpoint.pt')
     if args.overfit == 'overfit':
         trainer.overfit(10000)
     else:
@@ -137,7 +137,7 @@ def main(rank, world_size, args):
 
 def load_train_objects(rank, writer_dir):
     model = Model(rank)
-    dataset = ContentStyleDataset('album_covers_512/', 'mscoco/', 'wikiart/', transform = loader)
+    dataset = ContentStyleDataset('content/', 'style/', transform = loader)
     dataloader = DataLoader(dataset, batch_size = 8, collate_fn = collate, shuffle = False, num_workers = 0, sampler = DistributedSampler(dataset))
     writer = SummaryWriter(writer_dir)
     return model, dataloader, writer
