@@ -15,10 +15,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
+
+
+
 class Trainer():
-    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 5.0):
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, checkpoint_save_path, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 5.0):
         self.device = torch.device(rank)
         self.rank = rank
+        self.checkpoint_save_path = checkpoint_save_path
         self.model = DDP(model, device_ids=[rank])
         self.dataloader = dataloader
         self.lr = learning_rate
@@ -41,8 +45,6 @@ class Trainer():
                 self.run_epoch(epoch)
 
     def logs(self, step, content, style, stylized, content_loss, style_loss, loss):
-       # if step == 0:
-            #self.writer.add_graph(self.model, (torch.randn(self.dataloader.batch_size, 3, 128, 128), torch.randn(self.dataloader.batch_size, 3, 128, 128)))
         self.writer.add_scalar("Style Loss", style_loss, step)
         self.writer.add_scalar("Content Loss", content_loss, step)
         self.writer.add_scalar("Total Loss", loss, step)
@@ -52,12 +54,14 @@ class Trainer():
             vutils.save_image(grid, self.progress_dir + str(self.step)+'.png')
 
     def learning_rate_decay(self):
+        '''Learning rate decay based on the torch implementation by the authors of the paper '''
         lr = self.lr / (1.0 + self.lr_decay * self.step)
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
 
 
     def overfit(self, iters):
+        '''Overfit the model on a single batch for debugging purposes, sanity check that the encoder is set up properly and backprop is doing its thing'''
         data = next(iter(self.dataloader))
         data = data.to(self.device)
         with trange(0, iters, desc="All epochs") as progress_bar:
@@ -77,7 +81,7 @@ class Trainer():
             progress_bar.update(1)
             progress_bar.set_postfix(content_loss = content_loss.item(), style_loss = style_loss.item(), total_loss = loss.item())
             if batch_num % 200 == 0 and self.rank == 0:
-                self.save_model(epoch_num, "checkpoint.pt")
+                self.save_model(epoch_num, self.checkpoint_save_path)
 
     def training_step(self, data):
         content, style = data
@@ -126,9 +130,9 @@ def main(rank, world_size, args):
     device = torch.device("cuda", rank)
     ddp_setup(rank, world_size)
     model, dataloader, writer = load_train_objects(rank, args.writer_dir)
-    trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer, progress_dir = args.progress_dir)
+    trainer = Trainer(rank, model, dataloader, learning_rate = 1e-4, save_every = 1, writer = writer, progress_dir = args.progress_dir, checkpoint_path = args.checkpoint_path, checkpoint_save_path = args.checkpoint_save_path)
     if args.load_model:
-        trainer.load_checkpoint('checkpoint.pt')
+        trainer.load_checkpoint()
     if args.overfit == 'overfit':
         trainer.overfit(10000)
     else:
@@ -150,6 +154,9 @@ if __name__ == "__main__":
     parser.add_argument('writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
     parser.add_argument('overfit', type=str, help="overfit to overfit, any other str to run normally", default = "regular")
     parser.add_argument('progress_dir', type=str, help="Directory to save progress images, default is ./outputs", default = "./outputs")
+    parser.add_argument('save', type = bool, help = 'True by default, meaning the model saves checkpoints while training.', default = True)
+    parser.add_argument('checkpoint_path', type = str, help = 'path for the checkpoint to load model from, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
+    parser.add_argument('checkpoint_save_path', type = str, help = 'path to save model checkpoints in this run, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
     args = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
