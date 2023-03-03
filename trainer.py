@@ -19,9 +19,10 @@ from torch.utils.data.distributed import DistributedSampler
 
 
 class Trainer():
-    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, checkpoint_save_path, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 5.0):
+    def __init__(self, rank, model, dataloader, learning_rate, save_every, writer, progress_dir, checkpoint_path, checkpoint_save_path, optimizer = "adam", lr_decay = 5e-5, alpha = 1.0, k = 5.0):
         self.device = torch.device(rank)
         self.rank = rank
+        self.checkpoint_path = checkpoint_path
         self.checkpoint_save_path = checkpoint_save_path
         self.model = DDP(model, device_ids=[rank])
         self.dataloader = dataloader
@@ -81,7 +82,7 @@ class Trainer():
             progress_bar.update(1)
             progress_bar.set_postfix(content_loss = content_loss.item(), style_loss = style_loss.item(), total_loss = loss.item())
             if batch_num % 200 == 0 and self.rank == 0:
-                self.save_model(epoch_num, self.checkpoint_save_path)
+                self.save_model(epoch_num)
 
     def training_step(self, data):
         content, style = data
@@ -96,17 +97,17 @@ class Trainer():
         self.optimizer.step()
         return content_loss, style_loss, loss
     
-    def save_model(self, epoch, PATH):
+    def save_model(self, epoch):
         checkpoint = {
             "model" : self.model.state_dict(),
             "epoch" : epoch + 1,
             "optimizer": self.optimizer.state_dict(),
             "step": self.step
         }
-        torch.save(checkpoint, PATH)
+        torch.save(checkpoint, self.checkpoint_save_path)
 
-    def load_checkpoint(self, PATH):
-        checkpoint = torch.load(PATH, map_location = "cuda:{}".format(self.rank))
+    def load_checkpoint(self):
+        checkpoint = torch.load(self.checkpoint_path, map_location = "cuda:{}".format(self.rank))
         self.model.load_state_dict(checkpoint['model'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epoch = checkpoint['epoch']
@@ -142,7 +143,7 @@ def main(rank, world_size, args):
 def load_train_objects(rank, writer_dir):
     model = Model(rank)
     dataset = ContentStyleDataset('content/', 'style/', transform = loader)
-    dataloader = DataLoader(dataset, batch_size = 8, collate_fn = collate, shuffle = False, num_workers = 0, sampler = DistributedSampler(dataset))
+    dataloader = DataLoader(dataset, batch_size = 1, collate_fn = collate, shuffle = False, num_workers = 0, sampler = DistributedSampler(dataset))
     writer = SummaryWriter(writer_dir)
     return model, dataloader, writer
 
@@ -150,13 +151,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Neural Style Transfer following the AdaIN paper by Huang, et. al.')
     parser.add_argument('total_epochs', type=int, help='Total epochs to train the model', default = 1)
-    parser.add_argument('load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt, default 0', default = 0)
-    parser.add_argument('writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
-    parser.add_argument('overfit', type=str, help="overfit to overfit, any other str to run normally", default = "regular")
-    parser.add_argument('progress_dir', type=str, help="Directory to save progress images, default is ./outputs", default = "./outputs")
-    parser.add_argument('save', type = bool, help = 'True by default, meaning the model saves checkpoints while training.', default = True)
-    parser.add_argument('checkpoint_path', type = str, help = 'path for the checkpoint to load model from, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
-    parser.add_argument('checkpoint_save_path', type = str, help = 'path to save model checkpoints in this run, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
+    parser.add_argument('--load_model', type=int, help='0 to start a new model, non 0 to continue from checkpoint.pt, default 0', default = 0)
+    parser.add_argument('--writer_dir', type=str, help='Directory to save tensorboard logs, default is ./runs', default = './runs')
+    parser.add_argument('--overfit', type=str, help="overfit to overfit, any other str to run normally", default = "regular")
+    parser.add_argument('--progress_dir', type=str, help="Directory to save progress images, default is ./outputs", default = "./outputs")
+    parser.add_argument('--save', type = bool, help = 'True by default, meaning the model saves checkpoints while training.', default = True)
+    parser.add_argument('--checkpoint_path', type = str, help = 'path for the checkpoint to load model from, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
+    parser.add_argument('--checkpoint_save_path', type = str, help = 'path to save model checkpoints in this run, default is \'checkpoint.pt\'', default = 'checkpoint.pt')
     args = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
