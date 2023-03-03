@@ -40,4 +40,12 @@ You may use any image datasets with this model, I recommend WikiArt for style da
 <img src="results/riverside_2.png">
 
 # References and acknowledgements
+* Gatys, Leon A., Alexander S. Ecker, and Matthias Bethge. "A neural algorithm of artistic style." arXiv preprint arXiv:1508.06576 (2015).
+* Huang, Xun, and Serge Belongie. "Arbitrary style transfer in real-time with adaptive instance normalization." Proceedings of the IEEE international * conference on computer vision. 2017.
+* Simonyan, Karen, and Andrew Zisserman. "Very deep convolutional networks for large-scale image recognition." arXiv preprint arXiv:1409.1556 (2014).
+* Johnson, Justin, Alexandre Alahi, and Li Fei-Fei. "Perceptual losses for real-time style transfer and super-resolution." Computer Vision–ECCV 2016: * 14th European Conference, Amsterdam, The Netherlands, October 11-14, 2016, Proceedings, Part II 14. Springer International Publishing, 2016.
+* Ulyanov, Dmitry, Andrea Vedaldi, and Victor Lempitsky. "Instance normalization: The missing ingredient for fast stylization." arXiv preprint arXiv:1607.08022 (2016).
+* This really helpful youtube playlist and github repo by gordicaleksa https://github.com/gordicaleksa/pytorch-neural-style-transfer-johnson https://www.youtube.com/playlist?list=PLBoQnSflObcmbfshq9oNs41vODgXG-608
+* The original implementation of the paper in Torch by the authors https://github.com/xunhuang1995/AdaIN-style
+
 
